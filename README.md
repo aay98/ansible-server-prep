@@ -13,7 +13,7 @@ This role prepares a server for operation by:
 - **SSH Access**: Configured with key-based authentication.
 
 ## Variables
-**Change it in./inventory/hosts**
+**Change it in ./inventory/hosts**
 
 | Variable              | Default         | Description                                                                 |
 |-----------------------|-----------------|-----------------------------------------------------------------------------|
