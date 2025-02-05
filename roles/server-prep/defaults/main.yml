@@ -1,0 +1,7 @@
+---
+# defaults file for roles/server-prep
+encrypted_disk: "/dev/xvdf"
+encrypted_partition: '/dev/xvdf1'
+mount_point: "/data"
+mount_enabled: false
+luks_passphrase: SuperPass

@@ -1,0 +1,23 @@
+---
+# handlers file for roles/server-prep
+- name: update-grub
+  become: yes
+  command: update-grub
+  notify: reboot-system
+
+- name: reboot-system
+  become: yes
+  reboot:
+    reboot_timeout: 300
+
+- name: Apply Netplan
+  become: yes
+  command: netplan apply
+  listen: Apply Netplan
+
+- name: Restart network
+  become: yes
+  service:
+    name: network
+    state: restarted
+  listen: Restart network

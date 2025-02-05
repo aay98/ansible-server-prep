@@ -1,0 +1,7 @@
+[servers]
+server1 ansible_host=54.93.93.3 ansible_user=ubuntu
+
+[servers:vars]
+encrypted_disk=/dev/xvdf
+mount_point=/data
+mount_enabled=true

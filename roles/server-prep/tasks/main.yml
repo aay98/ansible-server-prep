@@ -1,0 +1,263 @@
+---
+# tasks file for roles/server-prep
+
+#encrypt disk
+- name: Check if the encrypted disk exists
+  stat:
+    path: "{{ encrypted_disk }}"   # ожидается, что переменная encrypted_disk установлена в "/dev/xvdf"
+  register: disk_check
+  tags: encryption
+
+- name: Fail if the encrypted disk is not found
+  fail:
+    msg: "Second disk {{ encrypted_disk }} not found. Please add a second disk to the server."
+  when: not disk_check.stat.exists
+  tags: encryption
+
+- name: Check if the encrypted partition exists
+  stat:
+    path: "{{ encrypted_partition }}"   # ожидается, что переменная encrypted_partition установлена в "/dev/xvdf1"
+  register: partition_check
+  tags: encryption
+
+- name: Create partition on {{ encrypted_disk }} if it does not exist
+  parted:
+    device: "{{ encrypted_disk }}"
+    number: 1
+    state: present
+    part_type: primary
+    # Используем весь диск: от начала до 100%
+    part_start: 0%
+    part_end: 100%
+    label: gpt
+  when: not partition_check.stat.exists
+  tags: encryption
+
+- name: Re-read partition table (optional)
+  command: partprobe {{ encrypted_disk }}
+  when: not partition_check.stat.exists
+  tags: encryption
+
+
+- name: Install cryptsetup for Debian/Ubuntu
+  become: yes
+  apt:
+    name: cryptsetup
+    state: present
+    update_cache: yes
+  when: ansible_facts['os_family'] == "Debian"
+  tags: encryption
+
+- name: Install cryptsetup for RHEL/CentOS
+  become: yes
+  yum:
+    name: cryptsetup
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+  tags: encryption
+
+- name: Create keyfile
+  copy:
+    content: "{{ luks_passphrase | trim }}"
+    dest: "{{ '/root/.keyfile' if ansible_user == 'root' else '/home/' + ansible_user + '/.keyfile' }}"
+    mode: '0666'
+  tags: encryption
+
+- name: Check if partition is encrypted with LUKS
+  command: cryptsetup luksDump "{{ encrypted_partition }}"
+  register: luks_check
+  changed_when: false
+  failed_when: false
+  tags: encryption_check
+
+- name: Encrypt the partition
+  become: yes
+  command: cryptsetup luksFormat --batch-mode --force-password --key-file="{{ '/root/.keyfile' if ansible_user == 'root' else '/home/' + ansible_user + '/.keyfile' }}" "{{ encrypted_partition }}"
+  # when: luks_check.rc != 0
+  register: encrypt_result
+  changed_when: encrypt_result.rc == 0
+  failed_when: encrypt_result.rc != 0
+  tags: encryption
+
+- name: Slurp keyfile content from remote host (для отладки, не использовать в production)
+  become: yes
+  slurp:
+    src: "{{ '/root/.keyfile' if ansible_user == 'root' else '/home/' + ansible_user + '/.keyfile' }}"
+  register: keyfile_slurp
+  tags: encryption_debug
+
+- name: Debug keyfile content (base64 decode)
+  debug:
+    msg: "{{ keyfile_slurp.content | b64decode }}"
+  tags: encryption_debug
+
+- name: Check if encrypted partition is already open
+  become: yes
+  command: cryptsetup status encrypted_part
+  register: cryptsetup_status
+  failed_when: false
+  changed_when: false
+  tags: encryption_check
+
+- name: Open the encrypted partition if not already open
+  become: yes
+  command: cryptsetup open --batch-mode --key-file="{{ '/root/.keyfile' if ansible_user == 'root' else '/home/' + ansible_user + '/.keyfile' }}" "{{ encrypted_partition }}" encrypted_part
+  when: partition_check.stat.exists and cryptsetup_status.rc != 0
+  register: open_result
+  changed_when: open_result.rc == 0
+  failed_when: open_result.rc != 0
+  tags: encryption
+
+- name: Show encryption status
+  debug:
+    msg: "Partition {{ encrypted_partition }} is encrypted with LUKS"
+  when: luks_check.rc == 0
+
+#mount partition
+- name: Create filesystem on encrypted partition (ext4)
+  filesystem:
+    dev: /dev/mapper/encrypted_part
+    fstype: ext4
+  when: mount_enabled | bool
+  tags: encryption
+
+- name: Create mount point directory
+  file:
+    path: "{{ mount_point }}"
+    state: directory
+    mode: 0755
+  when: mount_enabled | bool
+  tags: encryption
+
+- name: Mount encrypted partition
+  mount:
+    path: "{{ mount_point }}"
+    src: /dev/mapper/encrypted_part
+    fstype: ext4
+    state: mounted
+  when: mount_enabled | bool
+  tags: encryption
+
+#disable C-state
+# 3. install cpupower
+- name: Install cpupower tool on Debian/Ubuntu
+  become: yes
+  package:
+    name: linux-tools-common
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: cpu_setup
+
+- name: Install cpupower tool on Debian/Ubuntu for current kernel
+  become: yes
+  package:
+    name: "linux-tools-{{ ansible_kernel }}"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: cpu_setup
+
+- name: Install cpupower tool on RedHat/CentOS/Fedora
+  become: yes
+  package:
+    name: kernel-tools
+    state: present
+  when: ansible_os_family == "RedHat"
+  tags: cpu_setup
+
+- name: Load cpufreq performance module
+  become: yes
+  command: modprobe cpufreq_performance
+  ignore_errors: yes  
+  tags: cpu_setup
+
+- name: Check available cpufreq governors
+  become: yes
+  command: cpupower frequency-info --governors
+  register: cpufreq_governors
+  changed_when: false
+  failed_when: false
+  tags: cpu_setup
+
+#  If governor performance availiable - install
+- name: Set CPU performance mode if performance governor is available
+  become: yes
+  become_user: root
+  command: cpupower frequency-set -g performance
+  when: "'performance' in cpufreq_governors.stdout"
+  register: cpu_result
+  failed_when: cpu_result.rc != 0
+  changed_when: cpu_result.rc == 0
+  tags: cpu_setup
+
+- name: Notify that performance governor is not available
+  debug:
+    msg: "The 'performance' governor is not available on this system."
+  when: "'performance' not in cpufreq_governors.stdout"
+  tags: cpu_setup
+
+# Rename network interface to net0
+# tasks/network.yml
+- name: Update Netplan configuration (Ubuntu)
+  become: yes
+  lineinfile:
+    path: /etc/netplan/01-netcfg.yaml
+    regexp: '{{ ansible_default_ipv4.interface }}'
+    replace: 'net0'
+  register: netplan_change
+  notify: Apply Netplan
+  when: ansible_os_family == 'Debian'
+  tags: network
+
+- name: Update network config (CentOS)
+  become: yes
+  replace:
+    path: /etc/sysconfig/network-scripts/ifcfg-{{ ansible_default_ipv4.interface }}
+    regexp: 'NAME={{ ansible_default_ipv4.interface }}'
+    replace: 'NAME=net0'
+  register: network_change
+  notify: Restart network
+  when: ansible_os_family == 'RedHat'
+  tags: network
+
+- name: Create udev rule for persistent interface name
+  become: yes
+  copy:
+    content: 'SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ ansible_default_ipv4.macaddress }}", NAME="net0"'
+    dest: /etc/udev/rules.d/70-persistent-net.rules
+    mode: 0644
+  tags: network
+
+- name: Rename network interface to net0
+  become: yes
+  shell: |
+    ip link set {{ ansible_default_ipv4.interface }} down
+    ip link set {{ ansible_default_ipv4.interface }} name net0
+    ip link set net0 up
+  args:
+    warn: false
+  register: rename_result
+  changed_when: "'net0' not in ansible_facts.interfaces"
+  tags: network
+
+- name: Wait for server to become reachable
+  wait_for_connection:
+    delay: 10
+    timeout: 120
+  tags: network
+
+- name: Display renamed interface information
+  command: ip link show net0
+  register: interface_info
+  changed_when: false
+
+- debug:
+    var: interface_info.stdout
+
+# CPU info
+- name: Gather CPU information
+  command: lscpu
+  register: cpu_info
+  changed_when: false
+
+- debug:
+    var: cpu_info.stdout
