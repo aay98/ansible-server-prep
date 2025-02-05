@@ -13,12 +13,7 @@ This role prepares a server for operation by:
 - **SSH Access**: Configured with key-based authentication.
 
 ## Variables
-Variables stored in:
-.
-└── roles
-    └── server-prep
-        ├── defaults
-            └── main.yml
+**Variables stored in ./roles/server-prep/defaults/main.yml**
 
 | Variable              | Default         | Description                                                                 |
 |-----------------------|-----------------|-----------------------------------------------------------------------------|
