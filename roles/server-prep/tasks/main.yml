@@ -73,7 +73,7 @@
 - name: Encrypt the partition
   become: yes
   command: cryptsetup luksFormat --batch-mode --force-password --key-file="{{ '/root/.keyfile' if ansible_user == 'root' else '/home/' + ansible_user + '/.keyfile' }}" "{{ encrypted_partition }}"
-  # when: luks_check.rc != 0
+  when: luks_check.rc != 0
   register: encrypt_result
   changed_when: encrypt_result.rc == 0
   failed_when: encrypt_result.rc != 0
@@ -139,7 +139,7 @@
   tags: encryption
 
 #disable C-state
-# 3. install cpupower
+# install cpupower
 - name: Install cpupower tool on Debian/Ubuntu
   become: yes
   package:
@@ -196,45 +196,62 @@
   tags: cpu_setup
 
 # Rename network interface to net0
-# tasks/network.yml
-- name: Update Netplan configuration (Ubuntu)
+- name: Find Netplan configuration file (Ubuntu)
+  find:
+    paths: /etc/netplan
+    patterns: "*.yaml"
+    file_type: file
+  register: netplan_files
+  when: ansible_os_family == 'Debian'
+  tags: network
+
+- name: Fail if no Netplan configuration file found
+  fail:
+    msg: "No Netplan configuration file found in /etc/netplan"
+  when: ansible_os_family == 'Debian' and netplan_files.matched == 0
+  tags: network
+
+- name: Set Netplan config file path fact
+  set_fact:
+    netplan_config_file: "{{ netplan_files.files[0].path }}"
+  when: ansible_os_family == 'Debian'
+  tags: network
+
+- name: Update Netplan configuration file to use interface net0
   become: yes
   lineinfile:
-    path: /etc/netplan/01-netcfg.yaml
-    regexp: '{{ ansible_default_ipv4.interface }}'
-    replace: 'net0'
+    path: "{{ netplan_config_file }}"
+    regexp: "{{ ansible_default_ipv4.interface }}"
+    line: "net0"
+    backup: yes
   register: netplan_change
   notify: Apply Netplan
   when: ansible_os_family == 'Debian'
   tags: network
 
-- name: Update network config (CentOS)
-  become: yes
-  replace:
-    path: /etc/sysconfig/network-scripts/ifcfg-{{ ansible_default_ipv4.interface }}
-    regexp: 'NAME={{ ansible_default_ipv4.interface }}'
-    replace: 'NAME=net0'
-  register: network_change
-  notify: Restart network
-  when: ansible_os_family == 'RedHat'
-  tags: network
-
-- name: Create udev rule for persistent interface name
+- name: Create udev rule for persistent interface naming
   become: yes
   copy:
-    content: 'SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ ansible_default_ipv4.macaddress }}", NAME="net0"'
     dest: /etc/udev/rules.d/70-persistent-net.rules
-    mode: 0644
+    content: 'SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ ansible_default_ipv4.macaddress }}", NAME="net0"'
+    mode: '0644'
+  tags: network
+
+- name: Schedule fallback to revert interface renaming in case of connectivity loss
+  become: yes
+  shell: >
+    echo "ip link set net0 name {{ ansible_default_ipv4.interface }} &&
+          ip link set {{ ansible_default_ipv4.interface }} up" |
+    at now + 5 minutes
+  register: fallback_schedule
   tags: network
 
 - name: Rename network interface to net0
-  become: yes
-  shell: |
-    ip link set {{ ansible_default_ipv4.interface }} down
-    ip link set {{ ansible_default_ipv4.interface }} name net0
-    ip link set net0 up
-  args:
-    warn: false
+  ansible.builtin.shell:
+    cmd: |
+      ip link set {{ ansible_default_ipv4.interface }} down
+      ip link set {{ ansible_default_ipv4.interface }} name net0
+      ip link set net0 up
   register: rename_result
   changed_when: "'net0' not in ansible_facts.interfaces"
   tags: network
@@ -245,13 +262,22 @@
     timeout: 120
   tags: network
 
+- name: Cancel scheduled fallback job
+  become: yes
+  shell: |
+    for job in $(atq | awk '{print $1}'); do atrm $job; done
+  when: rename_result is succeeded
+  tags: network
+  
 - name: Display renamed interface information
   command: ip link show net0
   register: interface_info
   changed_when: false
+  tags: network
 
 - debug:
     var: interface_info.stdout
+  tags: network
 
 # CPU info
 - name: Gather CPU information
